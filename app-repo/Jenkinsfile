@@ -1,0 +1,79 @@
+pipeline {
+    agent any
+    environment {
+        // Thay đổi các thông số này theo hệ thống thực tế của bạn
+        DOCKER_REGISTRY = 'your-docker-username' 
+        DOCKER_CREDS_ID = 'dockerhub-credentials' // ID credential Docker lưu trong Jenkins
+        GITOPS_GIT_CREDS = 'gitops-ssh-key'       // ID credential Git lưu trong Jenkins
+        GITOPS_REPO = 'git@github.com:your-user/gitops-repo.git'
+        IMAGE_TAG = "v1.${BUILD_NUMBER}"
+    }
+    stages {
+        stage('Detect Changes') {
+            steps {
+                script {
+                    // Phát hiện thư mục nào có thay đổi so với commit trước đó
+                    env.CHANGE_BACKEND = sh(script: 'git diff --name-only HEAD~1 HEAD | grep "^backend/" || true', returnStdout: true).trim()
+                    env.CHANGE_FRONTEND = sh(script: 'git diff --name-only HEAD~1 HEAD | grep "^frontend/" || true', returnStdout: true).trim()
+                }
+            }
+        }
+        stage('Build & Push Backend') {
+            when { expression { env.CHANGE_BACKEND != '' } }
+            steps {
+                script {
+                    dir('backend') {
+                        docker.withRegistry('', DOCKER_CREDS_ID) {
+                            def backendApp = docker.build("${DOCKER_REGISTRY}/lab1-backend:${IMAGE_TAG}")
+                            backendApp.push()
+                        }
+                    }
+                }
+            }
+        }
+        stage('Build & Push Frontend') {
+            when { expression { env.CHANGE_FRONTEND != '' } }
+            steps {
+                script {
+                    dir('frontend') {
+                        docker.withRegistry('', DOCKER_CREDS_ID) {
+                            def frontendApp = docker.build("${DOCKER_REGISTRY}/lab1-frontend:${IMAGE_TAG}")
+                            frontendApp.push()
+                        }
+                    }
+                }
+            }
+        }
+        stage('Update GitOps Repo') {
+            when { 
+                expression { env.CHANGE_BACKEND != '' || env.CHANGE_FRONTEND != '' } 
+            }
+            steps {
+                sshagent(credentials: [GITOPS_GIT_CREDS]) {
+                    sh """
+                    # Xóa thư mục tạm nếu đã tồn tại từ bản build trước
+                    rm -rf gitops-workspace
+                    git clone ${GITOPS_REPO} gitops-workspace
+                    cd gitops-workspace
+
+                    # Thay thế tag mới cho Backend nếu có build
+                    if [ -n "${CHANGE_BACKEND}" ]; then
+                        sed -i.bak "s|image: ${DOCKER_REGISTRY}/lab1-backend:.*|image: ${DOCKER_REGISTRY}/lab1-backend:${IMAGE_TAG}|g" apps/lab1-app.yaml
+                    fi
+
+                    # Thay thế tag mới cho Frontend nếu có build
+                    if [ -n "${CHANGE_FRONTEND}" ]; then
+                        sed -i.bak "s|image: ${DOCKER_REGISTRY}/lab1-frontend:.*|image: ${DOCKER_REGISTRY}/lab1-frontend:${IMAGE_TAG}|g" apps/lab1-app.yaml
+                    fi
+
+                    git config user.email "jenkins@lab.local"
+                    git config user.name "Jenkins CI"
+                    git add apps/lab1-app.yaml
+                    git commit -m "Auto-update image tag to ${IMAGE_TAG} by Jenkins"
+                    git push origin main
+                    """
+                }
+            }
+        }
+    }
+}
