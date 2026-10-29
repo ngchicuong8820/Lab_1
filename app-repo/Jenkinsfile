@@ -5,7 +5,7 @@ pipeline {
         DOCKER_REGISTRY = 'your-docker-username' 
         DOCKER_CREDS_ID = 'dockerhub-credentials' // ID credential Docker lưu trong Jenkins
         GITOPS_GIT_CREDS = 'gitops-ssh-key'       // ID credential Git lưu trong Jenkins
-        GITOPS_REPO = 'git@github.com:your-user/gitops-repo.git'
+        GITOPS_REPO = 'https://github.com/ngchicuong8820/Lab_1.git'
         IMAGE_TAG = "v1.${BUILD_NUMBER}"
     }
     stages {

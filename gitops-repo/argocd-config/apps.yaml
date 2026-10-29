@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'https://github.com/ngchicuong8820/gitops-lab1' # THAY URL CỦA BẠN
+    repoURL: 'https://github.com/ngchicuong8820/Lab_1.git' # THAY URL CỦA BẠN
     targetRevision: HEAD
     path: apps
   destination:
