@@ -1,79 +1,124 @@
 pipeline {
-    agent any
-    environment {
-        // Thay đổi các thông số này theo hệ thống thực tế của bạn
-        DOCKER_REGISTRY = 'your-docker-username' 
-        DOCKER_CREDS_ID = 'dockerhub-credentials' // ID credential Docker lưu trong Jenkins
-        GITOPS_GIT_CREDS = 'gitops-ssh-key'       // ID credential Git lưu trong Jenkins
-        GITOPS_REPO = 'https://github.com/ngchicuong8820/Lab_1.git'
-        IMAGE_TAG = "v1.${BUILD_NUMBER}"
+    agent {
+        docker {
+            image 'maven:3.8.6-openjdk-11'
+            // Mount docker socket để Jenkins có thể gọi lệnh docker run (cho ZAP và Build)
+            args '-v $HOME/.m2:/root/.m2 -v /var/run/docker.sock:/var/run/docker.sock'
+        }
     }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        // Cấu hình kho lưu trữ (Thay ngchicuong8820 bằng Docker ID của bạn nếu khác)
+        DOCKER_IMAGE = "ngchicuong8820/lab1-app"
+        IMAGE_TAG = "v${env.BUILD_NUMBER}"
+        GITOPS_REPO = "https://github.com/ngchicuong8820/Lab_1.git"
+        
+        // URL ứng dụng để quét DAST (Jenkins dùng host.docker.internal để trỏ ra ngoài máy Mac)
+        APP_URL = "http://host.docker.internal:8080"
+        
+        // ID Credentials tạo trên Jenkins
+        DOCKER_CRED_ID = 'docker-creds'
+        GITHUB_CRED_ID = 'github-token'
+    }
+
     stages {
-        stage('Detect Changes') {
-            steps {
-                script {
-                    // Phát hiện thư mục nào có thay đổi so với commit trước đó
-                    env.CHANGE_BACKEND = sh(script: 'git diff --name-only HEAD~1 HEAD | grep "^backend/" || true', returnStdout: true).trim()
-                    env.CHANGE_FRONTEND = sh(script: 'git diff --name-only HEAD~1 HEAD | grep "^frontend/" || true', returnStdout: true).trim()
-                }
-            }
+        stage('1. Checkout Code') {
+            steps { checkout scm }
         }
-        stage('Build & Push Backend') {
-            when { expression { env.CHANGE_BACKEND != '' } }
-            steps {
-                script {
-                    dir('backend') {
-                        docker.withRegistry('', DOCKER_CREDS_ID) {
-                            def backendApp = docker.build("${DOCKER_REGISTRY}/lab1-backend:${IMAGE_TAG}")
-                            backendApp.push()
-                        }
+
+        stage('2. Code & IaC Security (SAST/SCA)') {
+            failFast true
+            parallel {
+                stage('Unit Test') {
+                    steps { 
+                        dir('app-repo') { sh 'mvn clean test' }
+                    }
+                }
+                stage('SAST & SCA (Trivy)') {
+                    steps {
+                        // Tải Trivy CLI vào pipeline và quét thư mục app-repo
+                        sh '''
+                        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+                        trivy fs ./app-repo/ --scanners vuln,secret,misconfig --exit-code 0
+                        '''
+                    }
+                }
+                stage('IaC Scan') {
+                    steps {
+                        // Trivy quét thư mục gitops-repo chứa cấu hình K8s/Terraform
+                        sh 'trivy config ./gitops-repo/ --exit-code 0 --severity HIGH,CRITICAL'
                     }
                 }
             }
         }
-        stage('Build & Push Frontend') {
-            when { expression { env.CHANGE_FRONTEND != '' } }
-            steps {
-                script {
-                    dir('frontend') {
-                        docker.withRegistry('', DOCKER_CREDS_ID) {
-                            def frontendApp = docker.build("${DOCKER_REGISTRY}/lab1-frontend:${IMAGE_TAG}")
-                            frontendApp.push()
-                        }
-                    }
-                }
+
+        stage('3. Build Artifact') {
+            steps { 
+                dir('app-repo') { sh 'mvn clean package -DskipTests' } 
             }
         }
-        stage('Update GitOps Repo') {
-            when { 
-                expression { env.CHANGE_BACKEND != '' || env.CHANGE_FRONTEND != '' } 
-            }
+
+        stage('4. Build Image') {
+            steps { sh "docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} ./app-repo" }
+        }
+
+        stage('5. Container Security') {
             steps {
-                sshagent(credentials: [GITOPS_GIT_CREDS]) {
+                sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${IMAGE_TAG}"
+            }
+        }
+
+        stage('6. Push Registry') {
+            steps {
+                // Dùng Jenkins Credentials thay thế Vault
+                withCredentials([usernamePassword(credentialsId: env.DOCKER_CRED_ID, passwordVariable: 'DOCKER_PASS', usernameVariable: 'DOCKER_USER')]) {
                     sh """
-                    # Xóa thư mục tạm nếu đã tồn tại từ bản build trước
-                    rm -rf gitops-workspace
-                    git clone ${GITOPS_REPO} gitops-workspace
-                    cd gitops-workspace
-
-                    # Thay thế tag mới cho Backend nếu có build
-                    if [ -n "${CHANGE_BACKEND}" ]; then
-                        sed -i.bak "s|image: ${DOCKER_REGISTRY}/lab1-backend:.*|image: ${DOCKER_REGISTRY}/lab1-backend:${IMAGE_TAG}|g" apps/lab1-app.yaml
-                    fi
-
-                    # Thay thế tag mới cho Frontend nếu có build
-                    if [ -n "${CHANGE_FRONTEND}" ]; then
-                        sed -i.bak "s|image: ${DOCKER_REGISTRY}/lab1-frontend:.*|image: ${DOCKER_REGISTRY}/lab1-frontend:${IMAGE_TAG}|g" apps/lab1-app.yaml
-                    fi
-
-                    git config user.email "jenkins@lab.local"
-                    git config user.name "Jenkins CI"
-                    git add apps/lab1-app.yaml
-                    git commit -m "Auto-update image tag to ${IMAGE_TAG} by Jenkins"
-                    git push origin main
+                    echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                    docker push ${DOCKER_IMAGE}:${IMAGE_TAG}
                     """
                 }
             }
+        }
+
+        stage('7. Update GitOps Manifest') {
+            steps {
+                withCredentials([string(credentialsId: env.GITHUB_CRED_ID, variable: 'GIT_TOKEN')]) {
+                    sh """
+                    git clone https://oauth2:\${GIT_TOKEN}@github.com/ngchicuong8820/Lab_1.git lab1-temp
+                    cd lab1-temp
+
+                    # Cập nhật Tag ứng dụng trong file cấu hình
+                    sed -i "s|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|g" gitops-repo/deployment.yaml
+
+                    git config user.name "Jenkins DevSecOps Bot"
+                    git config user.email "jenkins@lab.local"
+                    git add gitops-repo/
+                    git commit -m "chore: release ${IMAGE_TAG} [skip ci]"
+                    git push origin HEAD:main
+                    """
+                }
+            }
+        }
+
+        stage('8. Dynamic Application Security Testing (DAST)') {
+            steps {
+                // Chạy ZAP Scanner trực tiếp qua Docker container tạm thời
+                sh """
+                echo "Quét DAST vào ứng dụng frontend..."
+                docker run --rm -t owasp/zap2docker-stable zap-baseline.py -t ${APP_URL} -I || true
+                """
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs() // Dọn sạch rác trong Jenkins workspace khi chạy xong
         }
     }
 }
