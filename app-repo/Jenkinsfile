@@ -1,11 +1,5 @@
 pipeline {
-    agent {
-        docker {
-            image 'maven:3.8.6-openjdk-11'
-            // Mount docker socket để Jenkins có thể gọi lệnh docker run (cho ZAP và Build)
-            args '-v $HOME/.m2:/root/.m2 -v /var/run/docker.sock:/var/run/docker.sock'
-        }
-    }
+    agent any // Tối ưu: Dùng môi trường gốc để tránh lỗi "Invalid agent type docker"
 
     options {
         timeout(time: 30, unit: 'MINUTES')
@@ -13,15 +7,11 @@ pipeline {
     }
 
     environment {
-        // Cấu hình kho lưu trữ (Thay ngchicuong8820 bằng Docker ID của bạn nếu khác)
         DOCKER_IMAGE = "ngchicuong8820/lab1-app"
         IMAGE_TAG = "v${env.BUILD_NUMBER}"
         GITOPS_REPO = "https://github.com/ngchicuong8820/Lab_1.git"
-        
-        // URL ứng dụng để quét DAST (Jenkins dùng host.docker.internal để trỏ ra ngoài máy Mac)
         APP_URL = "http://host.docker.internal:8080"
         
-        // ID Credentials tạo trên Jenkins
         DOCKER_CRED_ID = 'docker-creds'
         GITHUB_CRED_ID = 'github-token'
     }
@@ -41,17 +31,16 @@ pipeline {
                 }
                 stage('SAST & SCA (Trivy)') {
                     steps {
-                        // Tải Trivy CLI vào pipeline và quét thư mục app-repo
+                        // Tối ưu: Cài Trivy vào thư mục ./bin cục bộ để tránh lỗi thiếu quyền Root
                         sh '''
-                        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-                        trivy fs ./app-repo/ --scanners vuln,secret,misconfig --exit-code 0
+                        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ./bin
+                        ./bin/trivy fs ./app-repo/ --scanners vuln,secret,misconfig --exit-code 0
                         '''
                     }
                 }
                 stage('IaC Scan') {
                     steps {
-                        // Trivy quét thư mục gitops-repo chứa cấu hình K8s/Terraform
-                        sh 'trivy config ./gitops-repo/ --exit-code 0 --severity HIGH,CRITICAL'
+                        sh './bin/trivy config ./gitops-repo/ --exit-code 0 --severity HIGH,CRITICAL'
                     }
                 }
             }
@@ -69,13 +58,12 @@ pipeline {
 
         stage('5. Container Security') {
             steps {
-                sh "trivy image --exit-code 0 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${IMAGE_TAG}"
+                sh "./bin/trivy image --exit-code 0 --severity HIGH,CRITICAL ${DOCKER_IMAGE}:${IMAGE_TAG}"
             }
         }
 
         stage('6. Push Registry') {
             steps {
-                // Dùng Jenkins Credentials thay thế Vault
                 withCredentials([usernamePassword(credentialsId: env.DOCKER_CRED_ID, passwordVariable: 'DOCKER_PASS', usernameVariable: 'DOCKER_USER')]) {
                     sh """
                     echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
@@ -89,10 +77,12 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: env.GITHUB_CRED_ID, variable: 'GIT_TOKEN')]) {
                     sh """
+                    # Tối ưu: Dọn dẹp thư mục clone cũ để tránh rác từ các lần build trước
+                    rm -rf lab1-temp
+                    
                     git clone https://oauth2:\${GIT_TOKEN}@github.com/ngchicuong8820/Lab_1.git lab1-temp
                     cd lab1-temp
 
-                    # Cập nhật Tag ứng dụng trong file cấu hình
                     sed -i "s|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:${IMAGE_TAG}|g" gitops-repo/deployment.yaml
 
                     git config user.name "Jenkins DevSecOps Bot"
@@ -107,7 +97,6 @@ pipeline {
 
         stage('8. Dynamic Application Security Testing (DAST)') {
             steps {
-                // Chạy ZAP Scanner trực tiếp qua Docker container tạm thời
                 sh """
                 echo "Quét DAST vào ứng dụng frontend..."
                 docker run --rm -t owasp/zap2docker-stable zap-baseline.py -t ${APP_URL} -I || true
@@ -118,7 +107,8 @@ pipeline {
     
     post {
         always {
-            cleanWs() // Dọn sạch rác trong Jenkins workspace khi chạy xong
+            // Tối ưu: Dùng shell script để dọn dẹp workspace thay cho plugin Workspace Cleanup
+            sh 'rm -rf ./*'
         }
     }
 }
