@@ -21,20 +21,31 @@ pipeline {
             steps { checkout scm }
         }
 
+        stage('1.5. Prepare Tools') {
+            steps {
+                sh '''
+                echo "Đang tải Trivy CLI..."
+                curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ./bin
+                
+                echo "Đang tải Maven Portable..."
+                curl -sSL -o maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.8.6/binaries/apache-maven-3.8.6-bin.tar.gz
+                tar xzf maven.tar.gz
+                '''
+            }
+        }
+
         stage('2. Code & IaC Security (SAST/SCA)') {
             failFast true
             parallel {
                 stage('Unit Test') {
                     steps { 
-                        dir('app-repo') { sh 'mvn clean test' }
+                        // Dùng file maven vừa tải về để build thay vì lệnh mvn của hệ thống
+                        dir('app-repo') { sh '../apache-maven-3.8.6/bin/mvn clean test' }
                     }
                 }
                 stage('SAST & SCA (Trivy)') {
                     steps {
-                        sh '''
-                        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ./bin
-                        ./bin/trivy fs ./app-repo/ --scanners vuln,secret,misconfig --exit-code 0
-                        '''
+                        sh './bin/trivy fs ./app-repo/ --scanners vuln,secret,misconfig --exit-code 0'
                     }
                 }
                 stage('IaC Scan') {
@@ -47,7 +58,7 @@ pipeline {
 
         stage('3. Build Artifact') {
             steps { 
-                dir('app-repo') { sh 'mvn clean package -DskipTests' } 
+                dir('app-repo') { sh '../apache-maven-3.8.6/bin/mvn clean package -DskipTests' } 
             }
         }
 
