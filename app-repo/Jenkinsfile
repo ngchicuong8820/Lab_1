@@ -1,5 +1,5 @@
 pipeline {
-    agent any // Tối ưu: Dùng môi trường gốc để tránh lỗi "Invalid agent type docker"
+    agent any
 
     options {
         timeout(time: 30, unit: 'MINUTES')
@@ -31,7 +31,6 @@ pipeline {
                 }
                 stage('SAST & SCA (Trivy)') {
                     steps {
-                        // Tối ưu: Cài Trivy vào thư mục ./bin cục bộ để tránh lỗi thiếu quyền Root
                         sh '''
                         curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ./bin
                         ./bin/trivy fs ./app-repo/ --scanners vuln,secret,misconfig --exit-code 0
@@ -77,9 +76,7 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: env.GITHUB_CRED_ID, variable: 'GIT_TOKEN')]) {
                     sh """
-                    # Tối ưu: Dọn dẹp thư mục clone cũ để tránh rác từ các lần build trước
                     rm -rf lab1-temp
-                    
                     git clone https://oauth2:\${GIT_TOKEN}@github.com/ngchicuong8820/Lab_1.git lab1-temp
                     cd lab1-temp
 
@@ -107,7 +104,6 @@ pipeline {
     
     post {
         always {
-            // Tối ưu: Dùng shell script để dọn dẹp workspace thay cho plugin Workspace Cleanup
             sh 'rm -rf ./*'
         }
     }
